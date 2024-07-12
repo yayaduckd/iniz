@@ -48,7 +48,7 @@ pub const Parser = struct {
                         return IniParseError.LineTooLong;
                     },
                     error.EndOfStream => {
-                        return IniParseError.UnexpectedEOF;
+                        // we reached the end of the file
                     },
                     else => {
                         return IniParseError.InvalidFile;
@@ -195,13 +195,7 @@ pub const Parser = struct {
                 else => {},
             }
 
-            const field_value = nextToken(alloc, reader, field_key, field_type) catch |err| {
-                switch (err) {
-                    else => {
-                        return err;
-                    },
-                }
-            };
+            const field_value = try nextToken(alloc, reader, field_key, field_type);
 
             @field(result, field_key) = field_value;
         }
@@ -218,6 +212,7 @@ pub const Parser = struct {
     }
 };
 
+// Tests
 test "web config test" {
     // try testing.expect(add(3, 7) == 10);
 
@@ -279,4 +274,50 @@ test "web config test" {
     alloc.free(result.Database.host);
     alloc.free(result.HTTP.host);
     alloc.free(result.name);
+}
+
+test "deeply nested struct test" {
+    const StructD = struct {
+        e: []const u8,
+    };
+
+    const StructC = struct {
+        number: u32,
+        d: StructD,
+    };
+
+    const StructB = struct {
+        c: StructC,
+    };
+
+    const StructA = struct {
+        b: StructB,
+    };
+
+    const TopStruct = struct {
+        b: u32,
+        a: StructA,
+    };
+
+    const ini_string =
+        \\ [Top]
+        \\ b = 10
+        \\ [Top.a]
+        \\ [Top.a.b]
+        \\ [Top.a.b.c]
+        \\ number = 20
+        \\ [Top.a.b.c.d]
+        \\ e = hello
+    ;
+
+    var stream = io.fixedBufferStream(ini_string);
+    const reader = stream.reader();
+
+    const result = try Parser.parse(TopStruct, testing.allocator, reader);
+
+    try testing.expect(result.b == 10);
+    try testing.expect(result.a.b.c.number == 20);
+    try testing.expect(mem.eql(u8, result.a.b.c.d.e, "hello"));
+
+    testing.allocator.free(result.a.b.c.d.e);
 }
