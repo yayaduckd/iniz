@@ -6,7 +6,7 @@ pub fn main() !void {
     const Parser = p.Parser;
 
     const HTTPConfig = struct {
-        port: u16,
+        port: ?u16,
         host: []const u8,
     };
 
@@ -41,6 +41,20 @@ pub fn main() !void {
     // # User Info
     // user = postgres
     // password = zigisfun
+    const init = WebConfig{
+        .name = "dropped duck",
+        .HTTP = HTTPConfig{
+            .port = null,
+            .host = "0",
+        },
+        .Database = DatabaseConfig{
+            .host = "localhost",
+            .port = 5432,
+            .database = "zig",
+            .user = "postgres",
+            .password = "zigisfun",
+        },
+    };
 
     const ini_file = try std.fs.cwd().openFile("src/WebServer.ini", .{});
     const reader = ini_file.reader();
@@ -49,8 +63,10 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var pp = try Parser.init(allocator, .{ .error_on_missing_key = false });
-    const result: WebConfig = try pp.parse(WebConfig, reader);
+    // const result: WebConfig = try pp.parse(WebConfig, reader);
+    const result: WebConfig = try pp.parseWithDefaultValues(WebConfig, init, reader);
 
     const writer = std.io.getStdOut().writer();
     try std.json.stringify(result, .{ .whitespace = .indent_4 }, writer);
+    try writer.writeByte('\n');
 }

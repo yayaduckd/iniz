@@ -19,6 +19,7 @@ pub const IniParseError = error{
     InvalidFile,
     InternalParseError,
     UnexpectedEOF,
+    UnexpectedData,
     KeyNotFound,
 };
 
@@ -68,6 +69,37 @@ pub const Parser = struct {
         }
     }
 
+    fn processValue(self: *Self, expected_type: type, value_bytes: []const u8) IniParseError!expected_type {
+        const type_info: builtin.Type = @typeInfo(expected_type);
+        switch (type_info) {
+            .Int => {
+                // parse it!
+                return std.fmt.parseInt(expected_type, value_bytes, 10) catch {
+                    return IniParseError.InvalidValue;
+                };
+            },
+            .Pointer => {
+                switch (type_info.Pointer.size) {
+                    .Slice => {
+                        return self.alloc.dupe(type_info.Pointer.child, value_bytes) catch {
+                            return IniParseError.InternalParseError;
+                        };
+                    },
+                    else => {
+                        return IniParseError.UnsupportedType;
+                    },
+                }
+            },
+            .Optional => {
+                return try self.processValue(type_info.Optional.child, value_bytes);
+            },
+
+            else => {
+                return IniParseError.UnsupportedType;
+            },
+        }
+    }
+
     fn nextToken(
         self: *Self,
         reader: anytype,
@@ -94,6 +126,7 @@ pub const Parser = struct {
                         },
                         error.EndOfStream => {
                             // we reached the end of the file
+                            return IniParseError.UnexpectedEOF;
                         },
                         else => {
                             return IniParseError.InvalidFile;
@@ -135,6 +168,7 @@ pub const Parser = struct {
                 if (section_end == self.bytes_read) {
                     return IniParseError.InvalidSection;
                 }
+                std.debug.assert(self.buffer[section_end] == ']');
 
                 const subbest_section_name = blk: {
                     if (last_dot) |pos| {
@@ -170,7 +204,6 @@ pub const Parser = struct {
         // we are at the start of the token
         // assert that the key is correct
         if (!mem.eql(u8, self.buffer[self.token_pos .. self.token_pos + expected_key.len], expected_key)) {
-            std.log.warn("Expected key: {s}, got: {s}", .{ expected_key, self.buffer[self.token_pos .. self.token_pos + expected_key.len] });
             return IniParseError.KeyNotFound;
         }
         self.token_pos += expected_key.len;
@@ -211,38 +244,13 @@ pub const Parser = struct {
         }
 
         const value_bytes = self.buffer[self.token_pos .. self.token_pos + value_len];
-
-        const type_info = @typeInfo(expected_type);
-
-        switch (type_info) {
-            .Int => {
-                // parse it!
-                return std.fmt.parseInt(expected_type, value_bytes, 10) catch {
-                    return IniParseError.InvalidValue;
-                };
-            },
-            .Pointer => {
-                switch (type_info.Pointer.size) {
-                    .Slice => {
-                        return self.alloc.dupe(type_info.Pointer.child, value_bytes) catch {
-                            return IniParseError.InternalParseError;
-                        };
-                    },
-                    else => {
-                        return IniParseError.UnsupportedType;
-                    },
-                }
-            },
-            else => {
-                return IniParseError.UnsupportedType;
-            },
-        }
+        return self.processValue(expected_type, value_bytes);
     }
 
     // Parse a file and return a struct
     // T: type of the struct to return
     // reader: reader to read the file. Must implement GenericReader
-    pub fn parseWithDefaultValues(
+    fn parseWithDefaultValuesInternal(
         self: *Self,
         T: type,
         instance: T,
@@ -272,7 +280,8 @@ pub const Parser = struct {
                     self.current_section = self.alloc.dupe(u8, field_key) catch {
                         return IniParseError.InternalParseError;
                     };
-                    const sub_instance = try self.parseWithDefaultValues(field_type, @field(instance, field_key), reader);
+                    reader.skipUntilDelimiterOrEof('\n') catch return IniParseError.InternalParseError;
+                    const sub_instance = try self.parseWithDefaultValuesInternal(field_type, @field(instance, field_key), reader);
                     @field(result, field_key) = sub_instance;
                     continue;
                 },
@@ -302,12 +311,47 @@ pub const Parser = struct {
     }
 
     // You are responsible for freeing all arrays or pointers returned by this function
+    pub fn parseWithDefaultValues(
+        self: *Self,
+        T: type,
+        instance: T,
+        reader: anytype,
+    ) IniParseError!T {
+        const result = try self.parseWithDefaultValuesInternal(T, instance, reader);
+
+        _ = self.nextToken(reader, "some", u8) catch |err| {
+            switch (err) {
+                IniParseError.KeyNotFound => {
+                    return IniParseError.UnexpectedData;
+                },
+                IniParseError.UnexpectedEOF => {
+                    return result;
+                },
+                else => {
+                    return err;
+                },
+            }
+        };
+        // reset streams and buffers
+        self.stream.reset();
+        self.token_pos = 0;
+        self.bytes_read = 0;
+        self.missedAKey = false;
+        self.alloc.free(self.buffer);
+        if (self.current_section) |sec| {
+            self.alloc.free(sec);
+        }
+
+        return IniParseError.UnexpectedData;
+    }
+
+    // You are responsible for freeing all arrays or pointers returned by this function
     pub fn parse(
         self: *Self,
         T: type,
         reader: anytype,
     ) IniParseError!T {
-        return self.parseWithDefaultValues(T, undefined, reader);
+        return self.parseWithDefaultValuesInternal(T, undefined, reader);
     }
 };
 
@@ -364,10 +408,12 @@ test "web config test" {
         .port = 1111,
         .database = "b",
         .user = "a",
+        .password = "d",
     } };
 
     // const result: WebConfig = try Parser.parse(WebConfig, alloc, reader, .{ .error_on_missing_key = false });
-    const p = try Parser.init(alloc, .{});
+    var p = try Parser.init(alloc, .{});
+    defer p.deinit();
     const result: WebConfig = try p.parseWithDefaultValues(WebConfig, init, reader);
 
     try testing.expect(mem.eql(u8, result.name, "DuckDrop"));
@@ -411,25 +457,27 @@ test "deeply nested struct test" {
     };
 
     const ini_string =
-        \\ [Top]
         \\ b = 10
-        \\ [Top.a]
-        \\ [Top.a.b]
-        \\ [Top.a.b.c]
+        \\ [a]
+        \\ [a.b]
+        \\ [a.b.c]
         \\ number = 20
-        \\ [Top.a.b.c.d]
+        \\ [a.b.c.d]
         \\ e = hello
+        \\
     ;
 
     var stream = io.fixedBufferStream(ini_string);
     const reader = stream.reader();
 
-    const p = try Parser.init(testing.allocator, .{});
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var p = try Parser.init(a, .{});
     const result = try p.parse(TopStruct, reader);
 
     try testing.expect(result.b == 10);
     try testing.expect(result.a.b.c.number == 20);
     try testing.expect(mem.eql(u8, result.a.b.c.d.e, "hello"));
-
-    testing.allocator.free(result.a.b.c.d.e);
 }
