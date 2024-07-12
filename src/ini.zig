@@ -6,8 +6,6 @@ const builtin = std.builtin;
 
 const testing = std.testing;
 
-const MAX_LINE_SIZE = 1024;
-
 pub const IniParseError = error{
     InvalidType,
     UnsupportedType,
@@ -33,367 +31,343 @@ pub const ParserConfig = struct {
     error_on_missing_key: bool = true,
 };
 
-pub const Parser = struct {
-    const Self = @This();
+const Self = @This();
 
-    config: ParserConfig,
+config: ParserConfig,
 
-    alloc: mem.Allocator,
+alloc: mem.Allocator,
 
-    buffer: []u8,
-    stream: io.FixedBufferStream([]u8),
-    bytes_read: usize = 0,
-    token_pos: usize = 0,
-    missedAKey: bool = false,
-    current_section: ?[]const u8 = null,
+buffer: []u8,
+stream: io.FixedBufferStream([]u8),
+bytes_read: usize = 0,
+token_pos: usize = 0,
+missedAKey: bool = false,
+current_section: []u8,
 
-    pub fn init(alloc: mem.Allocator, config: ParserConfig) !Self {
-        const buffer = try alloc.alloc(u8, config.max_line_size);
-        return initWithBuffer(alloc, buffer, config);
-    }
-
-    pub fn initWithBuffer(alloc: mem.Allocator, buffer: []u8, config: ParserConfig) Self {
-        const stream = io.fixedBufferStream(buffer);
-        return Self{
-            .alloc = alloc,
-            .config = config,
-            .buffer = buffer,
-            .stream = stream,
-        };
-    }
-
-    pub fn deinit(self: Self) void {
-        self.alloc.free(self.buffer);
-        if (self.current_section) |sec| {
-            self.alloc.free(sec);
-        }
-    }
-
-    fn processValue(self: *Self, expected_type: type, value_bytes: []const u8) IniParseError!expected_type {
-        const type_info: builtin.Type = @typeInfo(expected_type);
-        switch (type_info) {
-            .Int => {
-                // parse it!
-                return std.fmt.parseInt(expected_type, value_bytes, 10) catch {
-                    return IniParseError.InvalidValue;
-                };
-            },
-            .Pointer => {
-                switch (type_info.Pointer.size) {
-                    .Slice => {
-                        return self.alloc.dupe(type_info.Pointer.child, value_bytes) catch {
-                            return IniParseError.InternalParseError;
-                        };
-                    },
-                    else => {
-                        return IniParseError.UnsupportedType;
-                    },
-                }
-            },
-            .Optional => {
-                return try self.processValue(type_info.Optional.child, value_bytes);
-            },
-
-            else => {
-                return IniParseError.UnsupportedType;
-            },
-        }
-    }
-
-    fn nextToken(
-        self: *Self,
-        reader: anytype,
-        expected_key: []const u8,
-        expected_type: type,
-    ) IniParseError!expected_type {
-
-        // assert that the key is correct
-        std.debug.assert(expected_key.len > 0);
-
-        // var stream: io.FixedBufferStream([]u8) = io.fixedBufferStream(self.buffer);
-        // const writer = stream.writer();
-
-        // seek to next line
-        while (true) {
-            self.token_pos = 0;
-            if (self.missedAKey) {
-                self.missedAKey = false;
-            } else {
-                reader.streamUntilDelimiter(self.stream.writer(), '\n', self.config.max_line_size) catch |err| {
-                    switch (err) {
-                        error.StreamTooLong => {
-                            return IniParseError.LineTooLong;
-                        },
-                        error.EndOfStream => {
-                            // we reached the end of the file
-                            return IniParseError.UnexpectedEOF;
-                        },
-                        else => {
-                            return IniParseError.InvalidFile;
-                        },
-                    }
-                };
-                self.bytes_read = self.stream.getPos() catch return IniParseError.InternalParseError;
-                self.stream.reset();
-            }
-
-            if (self.bytes_read == 0) {
-                continue;
-            }
-
-            // seek to next token
-            while (self.token_pos < self.bytes_read and self.buffer[self.token_pos] == ' ') {
-                self.token_pos += 1;
-            }
-
-            if (self.token_pos == self.bytes_read) {
-                continue; // empty line
-            }
-            // check if it's a header
-
-            // section format: [TopLevel.section.subsection]
-            if (self.buffer[self.token_pos] == '[') {
-                if (self.current_section == null) {
-                    return IniParseError.InvalidSection;
-                }
-                // find ']' and last .
-                var section_end: usize = self.token_pos + 1;
-                var last_dot: ?usize = null;
-                while (section_end < self.bytes_read and self.buffer[section_end] != ']') {
-                    if (self.buffer[section_end] == '.') {
-                        last_dot = section_end;
-                    }
-                    section_end += 1;
-                }
-                if (section_end == self.bytes_read) {
-                    return IniParseError.InvalidSection;
-                }
-                std.debug.assert(self.buffer[section_end] == ']');
-
-                const subbest_section_name = blk: {
-                    if (last_dot) |pos| {
-                        // only take the name of the most specific subsection
-                        break :blk self.buffer[pos + 1 .. section_end];
-                    } else {
-                        // take the name of the section
-                        break :blk self.buffer[self.token_pos + 1 .. section_end];
-                    }
-                };
-
-                // check if the section is the current section
-                if (mem.eql(u8, self.current_section.?, subbest_section_name)) {
-                    continue;
-                } else {
-                    std.log.warn("Expected section {s}, got {s}", .{ self.current_section.?, subbest_section_name });
-                    if (self.config.error_on_missing_key) {
-                        return IniParseError.InvalidSection;
-                    } else {
-                        return IniParseError.KeyNotFound;
-                    }
-                }
-
-                continue;
-            }
-
-            // check if it's a comment
-            if (self.buffer[self.token_pos] == ';' or self.buffer[self.token_pos] == '#') {
-                continue;
-            }
-
-            break;
-        }
-        // we are at the start of the token
-        // assert that the key is correct
-        if (!mem.eql(u8, self.buffer[self.token_pos .. self.token_pos + expected_key.len], expected_key)) {
-            return IniParseError.KeyNotFound;
-        }
-        self.token_pos += expected_key.len;
-
-        // seek to next token
-        while (self.token_pos < self.bytes_read and self.buffer[self.token_pos] == ' ') {
-            self.token_pos += 1;
-        }
-        if (self.token_pos == self.bytes_read) {
-            return IniParseError.InvalidLine;
-        }
-        // check if the token is an equal sign
-        if (self.buffer[self.token_pos] != '=') {
-            return IniParseError.InvalidLine;
-        }
-
-        self.token_pos += 1;
-
-        // seek to next token
-        while (self.token_pos < self.bytes_read and self.buffer[self.token_pos] == ' ') {
-            self.token_pos += 1;
-        }
-        if (self.token_pos == self.bytes_read) {
-            return IniParseError.InvalidLine;
-        }
-
-        var i: usize = self.bytes_read - 1;
-
-        // find last non-whitespace char
-        while (i > self.token_pos and self.buffer[i] == ' ') {
-            i -= 1;
-        }
-
-        const value_len = i - self.token_pos + 1;
-
-        if (value_len == 0) {
-            return IniParseError.InvalidValue;
-        }
-
-        const value_bytes = self.buffer[self.token_pos .. self.token_pos + value_len];
-        return self.processValue(expected_type, value_bytes);
-    }
-
-    // Parse a file and return a struct
-    // T: type of the struct to return
-    // reader: reader to read the file. Must implement GenericReader
-    fn parseWithDefaultValuesInternal(
-        self: *Self,
-        T: type,
-        instance: T,
-        reader: anytype,
-    ) IniParseError!T {
-        const type_info = @typeInfo(T);
-        switch (type_info) {
-            .Struct => {},
-            .Optional => {
-                if (self.current_section) |sec| {
-                    self.alloc.free(sec);
-                }
-                const result = try self.parseWithDefaultValuesInternal(type_info.Optional.child, instance, reader);
-                return @as(T, result);
-            },
-            else => {
-                return IniParseError.InvalidType;
-            },
-        }
-
-        var result: T = instance;
-
-        inline for (type_info.Struct.fields) |field| {
-            const field_type = field.type;
-            const field_key = field.name;
-
-            // recurse into sub-structs
-            const field_type_info = @typeInfo(field_type);
-            switch (field_type_info) {
-                .Struct => {
-                    if (self.current_section) |sec| {
-                        self.alloc.free(sec);
-                    }
-                    self.current_section = self.alloc.dupe(u8, field_key) catch {
+fn processValue(self: *Self, expected_type: type, value_bytes: []const u8) IniParseError!expected_type {
+    const type_info: builtin.Type = @typeInfo(expected_type);
+    switch (type_info) {
+        .Int => {
+            // parse it!
+            return std.fmt.parseInt(expected_type, value_bytes, 10) catch {
+                return IniParseError.InvalidValue;
+            };
+        },
+        .Pointer => {
+            switch (type_info.Pointer.size) {
+                .Slice => {
+                    return self.alloc.dupe(type_info.Pointer.child, value_bytes) catch {
                         return IniParseError.InternalParseError;
                     };
-                    reader.skipUntilDelimiterOrEof('\n') catch return IniParseError.InternalParseError;
-                    const sub_instance = try self.parseWithDefaultValuesInternal(field_type, @field(instance, field_key), reader);
-                    @field(result, field_key) = sub_instance;
-                    continue;
                 },
-                .Optional => {
-                    const child_type_info = @typeInfo(field_type_info.Optional.child);
-                    switch (child_type_info) {
-                        .Struct => {
-                            if (self.current_section) |sec| {
-                                self.alloc.free(sec);
-                            }
-                            self.current_section = self.alloc.dupe(u8, field_key) catch {
-                                return IniParseError.InternalParseError;
-                            };
-                            reader.skipUntilDelimiterOrEof('\n') catch return IniParseError.InternalParseError;
-                            const sub_instance = self.parseWithDefaultValuesInternal(
-                                field_type_info.Optional.child,
-                                @field(instance, field_key) orelse undefined,
-                                reader,
-                            ) catch |err| blk: {
-                                switch (err) {
-                                    IniParseError.UnexpectedEOF => {
-                                        @field(result, field_key) = null;
-                                        break :blk @field(instance, field_key);
-                                    },
-                                    else => {
-                                        return err;
-                                    },
-                                }
-                            };
-                            @field(result, field_key) = sub_instance;
-                            continue;
-                        },
-                        else => {},
-                    }
+                else => {
+                    return IniParseError.UnsupportedType;
                 },
-                else => {},
             }
+        },
+        .Optional => {
+            return try self.processValue(type_info.Optional.child, value_bytes);
+        },
 
-            const field_value = self.nextToken(reader, field_key, field_type) catch |err| blk: {
+        else => {
+            return IniParseError.UnsupportedType;
+        },
+    }
+}
+
+fn nextToken(
+    self: *Self,
+    reader: anytype,
+    expected_key: []const u8,
+    expected_type: type,
+) IniParseError!expected_type {
+
+    // assert that the key is correct
+    std.debug.assert(expected_key.len > 0);
+
+    // var stream: io.FixedBufferStream([]u8) = io.fixedBufferStream(self.buffer);
+    // const writer = stream.writer();
+
+    // seek to next line
+    while (true) {
+        self.token_pos = 0;
+        if (self.missedAKey) {
+            self.missedAKey = false;
+        } else {
+            reader.streamUntilDelimiter(self.stream.writer(), '\n', self.config.max_line_size) catch |err| {
                 switch (err) {
-                    IniParseError.KeyNotFound => {
-                        if (self.config.error_on_missing_key) {
-                            return err;
-                        } else {
-                            self.missedAKey = true;
-                            self.token_pos = 0;
-                            break :blk @field(instance, field_key);
-                        }
+                    error.StreamTooLong => {
+                        return IniParseError.LineTooLong;
+                    },
+                    error.EndOfStream => {
+                        // we reached the end of the file
+                        return IniParseError.UnexpectedEOF;
                     },
                     else => {
-                        return err;
+                        return IniParseError.InvalidFile;
                     },
                 }
             };
-
-            @field(result, field_key) = field_value;
+            self.bytes_read = self.stream.getPos() catch return IniParseError.InternalParseError;
+            self.stream.reset();
         }
-        return result;
+
+        if (self.bytes_read == 0) {
+            continue;
+        }
+
+        // seek to next token
+        while (self.token_pos < self.bytes_read and self.buffer[self.token_pos] == ' ') {
+            self.token_pos += 1;
+        }
+
+        if (self.token_pos == self.bytes_read) {
+            continue; // empty line
+        }
+        // check if it's a header
+
+        // section format: [TopLevel.section.subsection]
+        if (self.buffer[self.token_pos] == '[') {
+            if (self.current_section.len == 0) {
+                return IniParseError.InvalidSection;
+            }
+            // find ']' and last .
+            var section_end: usize = self.token_pos + 1;
+            var last_dot: ?usize = null;
+            while (section_end < self.bytes_read and self.buffer[section_end] != ']') {
+                if (self.buffer[section_end] == '.') {
+                    last_dot = section_end;
+                }
+                section_end += 1;
+            }
+            if (section_end == self.bytes_read) {
+                return IniParseError.InvalidSection;
+            }
+            std.debug.assert(self.buffer[section_end] == ']');
+
+            const subbest_section_name = blk: {
+                if (last_dot) |pos| {
+                    // only take the name of the most specific subsection
+                    break :blk self.buffer[pos + 1 .. section_end];
+                } else {
+                    // take the name of the section
+                    break :blk self.buffer[self.token_pos + 1 .. section_end];
+                }
+            };
+
+            // check if the section is the current section
+            if (mem.eql(u8, self.current_section, subbest_section_name)) {
+                continue;
+            } else {
+                if (self.config.error_on_missing_key) {
+                    return IniParseError.InvalidSection;
+                } else {
+                    return IniParseError.KeyNotFound;
+                }
+            }
+
+            continue;
+        }
+
+        // check if it's a comment
+        if (self.buffer[self.token_pos] == ';' or self.buffer[self.token_pos] == '#') {
+            continue;
+        }
+
+        break;
+    }
+    // we are at the start of the token
+    // assert that the key is correct
+    if (!mem.eql(u8, self.buffer[self.token_pos .. self.token_pos + expected_key.len], expected_key)) {
+        return IniParseError.KeyNotFound;
+    }
+    self.token_pos += expected_key.len;
+
+    // seek to next token
+    while (self.token_pos < self.bytes_read and self.buffer[self.token_pos] == ' ') {
+        self.token_pos += 1;
+    }
+    if (self.token_pos == self.bytes_read) {
+        return IniParseError.InvalidLine;
+    }
+    // check if the token is an equal sign
+    if (self.buffer[self.token_pos] != '=') {
+        return IniParseError.InvalidLine;
     }
 
-    // You are responsible for freeing all arrays or pointers returned by this function
-    pub fn parseWithDefaultValues(
-        self: *Self,
-        T: type,
-        instance: T,
-        reader: anytype,
-    ) IniParseError!T {
-        const result = try self.parseWithDefaultValuesInternal(T, instance, reader);
+    self.token_pos += 1;
 
-        _ = self.nextToken(reader, "some", u8) catch |err| {
+    // seek to next token
+    while (self.token_pos < self.bytes_read and self.buffer[self.token_pos] == ' ') {
+        self.token_pos += 1;
+    }
+    if (self.token_pos == self.bytes_read) {
+        return IniParseError.InvalidLine;
+    }
+
+    var i: usize = self.bytes_read - 1;
+
+    // find last non-whitespace char
+    while (i > self.token_pos and self.buffer[i] == ' ') {
+        i -= 1;
+    }
+
+    const value_len = i - self.token_pos + 1;
+
+    if (value_len == 0) {
+        return IniParseError.InvalidValue;
+    }
+
+    const value_bytes = self.buffer[self.token_pos .. self.token_pos + value_len];
+    return self.processValue(expected_type, value_bytes);
+}
+
+// Parse a file and return a struct
+// T: type of the struct to return
+// reader: reader to read the file. Must implement GenericReader
+fn parseWithDefaultValuesInternal(
+    self: *Self,
+    T: type,
+    instance: T,
+    reader: anytype,
+) IniParseError!T {
+    const type_info = @typeInfo(T);
+    switch (type_info) {
+        .Struct => {},
+        .Optional => {
+            const result = try self.parseWithDefaultValuesInternal(type_info.Optional.child, instance, reader);
+            return @as(T, result);
+        },
+        else => {
+            return IniParseError.InvalidType;
+        },
+    }
+
+    var result: T = instance;
+
+    inline for (type_info.Struct.fields) |field| {
+        const field_type = field.type;
+        const field_key = field.name;
+        if (field_key.len > self.config.max_line_size) {
+            return IniParseError.LineTooLong;
+        }
+
+        // recurse into sub-structs
+        const field_type_info = @typeInfo(field_type);
+        switch (field_type_info) {
+            .Struct => {
+                self.current_section.len = field_key.len;
+                @memcpy(self.current_section, field_key);
+                reader.skipUntilDelimiterOrEof('\n') catch return IniParseError.InternalParseError;
+                const sub_instance = try self.parseWithDefaultValuesInternal(field_type, @field(instance, field_key), reader);
+                @field(result, field_key) = sub_instance;
+                continue;
+            },
+            .Optional => {
+                const child_type_info = @typeInfo(field_type_info.Optional.child);
+                switch (child_type_info) {
+                    .Struct => {
+                        self.current_section.len = field_key.len;
+                        @memcpy(self.current_section, field_key);
+                        reader.skipUntilDelimiterOrEof('\n') catch return IniParseError.InternalParseError;
+                        const sub_instance = self.parseWithDefaultValuesInternal(
+                            field_type_info.Optional.child,
+                            @field(instance, field_key) orelse undefined,
+                            reader,
+                        ) catch |err| blk: {
+                            switch (err) {
+                                IniParseError.UnexpectedEOF => {
+                                    @field(result, field_key) = null;
+                                    break :blk @field(instance, field_key);
+                                },
+                                else => {
+                                    return err;
+                                },
+                            }
+                        };
+                        @field(result, field_key) = sub_instance;
+                        continue;
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+
+        const field_value = self.nextToken(reader, field_key, field_type) catch |err| blk: {
             switch (err) {
                 IniParseError.KeyNotFound => {
-                    return IniParseError.UnexpectedData;
-                },
-                IniParseError.UnexpectedEOF => {
-                    return result;
+                    if (self.config.error_on_missing_key) {
+                        return err;
+                    } else {
+                        self.missedAKey = true;
+                        self.token_pos = 0;
+                        break :blk @field(instance, field_key);
+                    }
                 },
                 else => {
                     return err;
                 },
             }
         };
-        // reset streams and buffers
-        self.stream.reset();
-        self.token_pos = 0;
-        self.bytes_read = 0;
-        self.missedAKey = false;
-        self.alloc.free(self.buffer);
-        if (self.current_section) |sec| {
-            self.alloc.free(sec);
+
+        @field(result, field_key) = field_value;
+    }
+    return result;
+}
+
+// You are responsible for freeing all arrays or pointers returned by this function
+pub fn parseWithDefaultValues(
+    alloc: mem.Allocator,
+    T: type,
+    instance: T,
+    reader: anytype,
+    config: ParserConfig,
+) IniParseError!T {
+    var buffer: [config.max_line_size]u8 = undefined;
+    const stream = io.fixedBufferStream(&buffer);
+    var current_section: [config.max_line_size]u8 = undefined;
+    var self = Self{
+        .alloc = alloc,
+        .config = config,
+        .buffer = &buffer,
+        .stream = stream,
+        .current_section = &current_section,
+    };
+
+    const result = try self.parseWithDefaultValuesInternal(T, instance, reader);
+
+    _ = self.nextToken(reader, "check", u8) catch |err| {
+        switch (err) {
+            IniParseError.KeyNotFound => {
+                return IniParseError.UnexpectedData;
+            },
+            IniParseError.UnexpectedEOF => {
+                return result;
+            },
+            else => {
+                return err;
+            },
         }
+    };
+    // reset streams and buffers
+    self.stream.reset();
+    self.token_pos = 0;
+    self.bytes_read = 0;
+    self.missedAKey = false;
 
-        return IniParseError.UnexpectedData;
-    }
+    return IniParseError.UnexpectedData;
+}
 
-    // You are responsible for freeing all arrays or pointers returned by this function
-    pub fn parse(
-        self: *Self,
-        T: type,
-        reader: anytype,
-    ) IniParseError!T {
-        return self.parseWithDefaultValuesInternal(T, undefined, reader);
-    }
-};
+// You are responsible for freeing all arrays or pointers returned by this function
+pub fn parse(
+    alloc: mem.Allocator,
+    T: type,
+    reader: anytype,
+    config: ParserConfig,
+) IniParseError!T {
+    return parseWithDefaultValues(alloc, T, undefined, reader, config);
+}
 
 // Tests
 test "web config test" {
@@ -440,7 +414,7 @@ test "web config test" {
 
     const alloc = testing.allocator;
 
-    const init = WebConfig{ .name = "dropped duck", .HTTP = HTTPConfig{
+    const initial = WebConfig{ .name = "dropped duck", .HTTP = HTTPConfig{
         .port = 9999,
         .host = "0",
     }, .Database = DatabaseConfig{
@@ -451,10 +425,7 @@ test "web config test" {
         .password = "d",
     } };
 
-    // const result: WebConfig = try Parser.parse(WebConfig, alloc, reader, .{ .error_on_missing_key = false });
-    var p = try Parser.init(alloc, .{});
-    defer p.deinit();
-    const result: WebConfig = try p.parseWithDefaultValues(WebConfig, init, reader);
+    const result: WebConfig = try parseWithDefaultValues(alloc, WebConfig, initial, reader, .{});
 
     try testing.expect(mem.eql(u8, result.name, "DuckDrop"));
     try testing.expect(result.HTTP.port == 8080);
@@ -514,8 +485,7 @@ test "deeply nested struct test" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var p = try Parser.init(a, .{});
-    const result = try p.parse(TopStruct, reader);
+    const result = try parse(a, TopStruct, reader, .{});
 
     try testing.expect(result.b == 10);
     try testing.expect(result.a.b.c.number == 20);

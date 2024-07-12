@@ -3,8 +3,6 @@ const std = @import("std");
 const p = @import("ini.zig");
 
 pub fn main() !void {
-    const Parser = p.Parser;
-
     const HTTPConfig = struct {
         port: ?u16,
         host: []const u8,
@@ -63,10 +61,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var pp = try Parser.init(allocator, .{ .error_on_missing_key = false });
-    defer pp.deinit();
-    // const result: WebConfig = try pp.parse(WebConfig, reader);
-    const result: WebConfig = try pp.parseWithDefaultValues(WebConfig, init, reader);
+    const result: WebConfig = try p.parseWithDefaultValues(allocator, WebConfig, init, reader, .{});
 
     const writer = std.io.getStdOut().writer();
     try std.json.stringify(result, .{ .whitespace = .indent_4 }, writer);
