@@ -62,7 +62,7 @@ pub const Parser = struct {
         };
     }
 
-    fn deinit(self: Self) void {
+    pub fn deinit(self: Self) void {
         self.alloc.free(self.buffer);
         if (self.current_section) |sec| {
             self.alloc.free(sec);
@@ -184,6 +184,7 @@ pub const Parser = struct {
                 if (mem.eql(u8, self.current_section.?, subbest_section_name)) {
                     continue;
                 } else {
+                    std.log.warn("Expected section {s}, got {s}", .{ self.current_section.?, subbest_section_name });
                     if (self.config.error_on_missing_key) {
                         return IniParseError.InvalidSection;
                     } else {
@@ -259,6 +260,13 @@ pub const Parser = struct {
         const type_info = @typeInfo(T);
         switch (type_info) {
             .Struct => {},
+            .Optional => {
+                if (self.current_section) |sec| {
+                    self.alloc.free(sec);
+                }
+                const result = try self.parseWithDefaultValuesInternal(type_info.Optional.child, instance, reader);
+                return @as(T, result);
+            },
             else => {
                 return IniParseError.InvalidType;
             },
@@ -284,6 +292,38 @@ pub const Parser = struct {
                     const sub_instance = try self.parseWithDefaultValuesInternal(field_type, @field(instance, field_key), reader);
                     @field(result, field_key) = sub_instance;
                     continue;
+                },
+                .Optional => {
+                    const child_type_info = @typeInfo(field_type_info.Optional.child);
+                    switch (child_type_info) {
+                        .Struct => {
+                            if (self.current_section) |sec| {
+                                self.alloc.free(sec);
+                            }
+                            self.current_section = self.alloc.dupe(u8, field_key) catch {
+                                return IniParseError.InternalParseError;
+                            };
+                            reader.skipUntilDelimiterOrEof('\n') catch return IniParseError.InternalParseError;
+                            const sub_instance = self.parseWithDefaultValuesInternal(
+                                field_type_info.Optional.child,
+                                @field(instance, field_key) orelse undefined,
+                                reader,
+                            ) catch |err| blk: {
+                                switch (err) {
+                                    IniParseError.UnexpectedEOF => {
+                                        @field(result, field_key) = null;
+                                        break :blk @field(instance, field_key);
+                                    },
+                                    else => {
+                                        return err;
+                                    },
+                                }
+                            };
+                            @field(result, field_key) = sub_instance;
+                            continue;
+                        },
+                        else => {},
+                    }
                 },
                 else => {},
             }

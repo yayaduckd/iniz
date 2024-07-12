@@ -30,7 +30,7 @@ user = postgres
 password = zigisfun
 ```
 
-Define your destination struct (the naming of nested structs is not important):
+Define your destination struct (the naming of fields must match the naming within the .ini file):
 
 ```zig
 const HTTPConfig = struct {
@@ -56,13 +56,16 @@ const WebConfig = struct {
 And parse the file:
 
 ```zig
+const p = @import("ini.zig");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = gpa.allocator();
 
 const ini_file = try std.fs.cwd().openFile("src/WebServer.ini", .{});
 const reader = ini_file.reader();
 
-const result = try Parser.parse(WebConfig, allocator, reader);
+var pp = try p.Parser.init(allocator, .{});
+defer pp.deinit();
+const result: WebConfig = try pp.parse(WebConfig, reader);
 ```
 
 Just like that, you have a struct of type `WebConfig` with all the values from the .ini file. 🎉

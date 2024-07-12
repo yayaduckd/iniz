@@ -14,14 +14,14 @@ pub fn main() !void {
         host: []const u8,
         port: u16,
         database: []const u8,
-        user: []const u8,
+        user: ?[]const u8,
         password: []const u8,
     };
 
     const WebConfig = struct {
         name: []const u8,
         HTTP: HTTPConfig,
-        Database: DatabaseConfig,
+        Database: ?DatabaseConfig,
     };
 
     // ini file in question
@@ -47,13 +47,14 @@ pub fn main() !void {
             .port = null,
             .host = "0",
         },
-        .Database = DatabaseConfig{
-            .host = "localhost",
-            .port = 5432,
-            .database = "zig",
-            .user = "postgres",
-            .password = "zigisfun",
-        },
+        // .Database = DatabaseConfig{
+        //     .host = "localhost",
+        //     .port = 5432,
+        //     .database = "zig",
+        //     .user = null,
+        //     .password = "zigisfun",
+        // },
+        .Database = null,
     };
 
     const ini_file = try std.fs.cwd().openFile("src/WebServer.ini", .{});
@@ -63,6 +64,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var pp = try Parser.init(allocator, .{ .error_on_missing_key = false });
+    defer pp.deinit();
     // const result: WebConfig = try pp.parse(WebConfig, reader);
     const result: WebConfig = try pp.parseWithDefaultValues(WebConfig, init, reader);
 
