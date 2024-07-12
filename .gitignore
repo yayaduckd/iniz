@@ -1,0 +1,13 @@
+# Zig build artifacts
+zig-cache
+.zig-cache
+zig-out
+
+# Zig binaries
+zig
+zig-linux*
+zls
+zls-repo
+
+# IDEs
+.vscode
