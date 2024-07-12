@@ -68,7 +68,11 @@ fn processValue(self: *Self, expected_type: type, value_bytes: []const u8) IniPa
         .Optional => {
             return try self.processValue(type_info.Optional.child, value_bytes);
         },
-
+        .Enum => {
+            return std.meta.stringToEnum(expected_type, value_bytes) orelse {
+                return IniParseError.InvalidValue;
+            };
+        },
         else => {
             return IniParseError.UnsupportedType;
         },

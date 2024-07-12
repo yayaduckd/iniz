@@ -10,7 +10,13 @@ const HTTPConfig = struct {
     host: []const u8,
 };
 
+const DatabaseType = enum {
+    postgres,
+    mysql,
+};
+
 const DatabaseConfig = struct {
+    type: DatabaseType,
     host: []const u8,
     port: u16,
     database: []const u8,
@@ -37,6 +43,7 @@ test "web config test" {
     // host = 0.0.0.0
 
     // [Database]
+    // type = postgres
     // # DB Info
     // host = localhost
     // port = 5432
@@ -54,6 +61,7 @@ test "web config test" {
         .port = 9999,
         .host = "0",
     }, .Database = DatabaseConfig{
+        .type = DatabaseType.mysql,
         .host = "c",
         .port = 1111,
         .database = "b",
@@ -66,6 +74,7 @@ test "web config test" {
     try testing.expect(mem.eql(u8, result.name, "DuckDrop"));
     try testing.expect(result.HTTP.port == 8080);
     try testing.expect(mem.eql(u8, result.HTTP.host, "0.0.0.0"));
+    try testing.expect(result.Database.type == DatabaseType.postgres);
     try testing.expect(mem.eql(u8, result.Database.host, "localhost"));
     try testing.expect(result.Database.port == 5432);
     try testing.expect(mem.eql(u8, result.Database.database, "zig"));
@@ -136,6 +145,7 @@ test "missing fields" {
         \\ port = 8080
         \\ host = 0.0.0.0
         \\ [Database]
+        \\ type = postgres
         \\ # DB Info
         // \\ host = localhost // missing!
         \\ port = 5432
@@ -170,6 +180,7 @@ test "too many fields" {
         \\ port = 8080
         \\ host = 0.0.0.0
         \\ [Database]
+        \\ type = postgres
         \\ # DB Info
         \\ host = localhost
         \\ port = 5432

@@ -8,7 +8,13 @@ pub fn main() !void {
         host: []const u8,
     };
 
+    const DatabaseType = enum {
+        postgres,
+        mysql,
+    };
+
     const DatabaseConfig = struct {
+        type: DatabaseType,
         host: []const u8,
         port: u16,
         database: []const u8,
@@ -28,6 +34,7 @@ pub fn main() !void {
             .host = "0",
         },
         .Database = DatabaseConfig{
+            .type = DatabaseType.mysql,
             .host = "localhost",
             .port = 5432,
             .database = "zig",
