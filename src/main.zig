@@ -48,7 +48,8 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    const result = try Parser.parse(WebConfig, allocator, reader);
+    var pp = try Parser.init(allocator, .{ .error_on_missing_key = false });
+    const result: WebConfig = try pp.parse(WebConfig, reader);
 
     const writer = std.io.getStdOut().writer();
     try std.json.stringify(result, .{ .whitespace = .indent_4 }, writer);
