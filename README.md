@@ -8,7 +8,7 @@ human-readable config files for Zig programs.
 
 🦆
 
-## Example
+## Usage
 
 Let's parse this standard config file for a web server:
 
@@ -56,16 +56,22 @@ const WebConfig = struct {
 And parse the file:
 
 ```zig
+const std = @import("std");
 const p = @import("ini.zig");
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = gpa.allocator();
 
 const ini_file = try std.fs.cwd().openFile("src/WebServer.ini", .{});
 const reader = ini_file.reader();
 
-var pp = try p.Parser.init(allocator, .{});
-defer pp.deinit();
-const result: WebConfig = try pp.parse(WebConfig, reader);
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = gpa.allocator();
+
+const result: WebConfig = try p.parseWithDefaultValues(allocator, WebConfig, init, reader, .{});
+
+// You can pretty-print the result as JSON to see the parsed values
+const writer = std.io.getStdOut().writer();
+try std.json.stringify(result, .{ .whitespace = .indent_4 }, writer);
+try writer.writeByte('\n');
+
 ```
 
 Just like that, you have a struct of type `WebConfig` with all the values from the .ini file. 🎉

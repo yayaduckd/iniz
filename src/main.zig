@@ -12,47 +12,28 @@ pub fn main() !void {
         host: []const u8,
         port: u16,
         database: []const u8,
-        user: ?[]const u8,
+        user: []const u8,
         password: []const u8,
     };
 
     const WebConfig = struct {
         name: []const u8,
         HTTP: HTTPConfig,
-        Database: ?DatabaseConfig,
+        Database: DatabaseConfig,
     };
-
-    // ini file in question
-
-    // # Config for the HTTP Server
-    // name = DuckDrop
-    // [HTTP]
-    // port = 8080
-    // host = 0.0.0.0
-
-    // [Database]
-    // # DB Info
-    // host = localhost
-    // port = 5432
-    // database = zig
-
-    // # User Info
-    // user = postgres
-    // password = zigisfun
     const init = WebConfig{
         .name = "dropped duck",
         .HTTP = HTTPConfig{
-            .port = null,
+            .port = 0,
             .host = "0",
         },
-        // .Database = DatabaseConfig{
-        //     .host = "localhost",
-        //     .port = 5432,
-        //     .database = "zig",
-        //     .user = null,
-        //     .password = "zigisfun",
-        // },
-        .Database = null,
+        .Database = DatabaseConfig{
+            .host = "localhost",
+            .port = 5432,
+            .database = "zig",
+            .user = "mlemmer",
+            .password = "zigisfun",
+        },
     };
 
     const ini_file = try std.fs.cwd().openFile("src/WebServer.ini", .{});
