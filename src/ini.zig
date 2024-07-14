@@ -7,17 +7,29 @@ const builtin = std.builtin;
 const testing = std.testing;
 
 pub const IniParseError = error{
+    // The type you want to parse into is not supported. It must be either a struct or an optional struct.
     InvalidType,
+    // The type of the FIELD you want to parse into is not supported.
     UnsupportedType,
+    // The line in the ini file is too long. Increase max_line_size in the config argument.
     LineTooLong,
+    // The section has invalid syntax or other issues.
     InvalidSection,
+    // The key has invalid syntax or other issues.
     InvalidKey,
+    // The value has invalid syntax, cannot be parsed into the destination type, or other issues.
     InvalidValue,
+    // The line of the ini file has invalid syntax or other issues.
     InvalidLine,
+    // Something about the file is invalid or unexpected.
     InvalidFile,
+    // Something unexpected went wrong with a standard library function.
     InternalParseError,
+    // The file ended unexpectedly.
     UnexpectedEOF,
+    // The file has unexpected data somewhere.
     UnexpectedData,
+    // The key was not found in the file.
     KeyNotFound,
 };
 
@@ -26,14 +38,21 @@ pub const ParserConfig = struct {
     // and causes an error.
     comptime max_line_size: usize = 1024,
 
-    // If true, the parser will error if a key is missing from the ini file.
+    // If true, the parser will error if an expected key is missing from the ini file.
     // Otherwise, it will be ignored and left undefined or as the given default value.
+    //
+    // If a struct field is optional, it will never error if the key is missing (instead
+    // it will be left as null or the default value if it's set).
+    //
+    // Be careful: setting this to false can lead to an undefined value ending up in the
+    // destination struct.
     error_on_missing_key: bool = true,
 };
 
 const Self = @This();
 
 config: ParserConfig,
+has_default_values: bool,
 
 alloc: mem.Allocator,
 
@@ -41,9 +60,10 @@ buffer: []u8,
 stream: io.FixedBufferStream([]u8),
 bytes_read: usize = 0,
 token_pos: usize = 0,
-missedAKey: bool = false,
+missed_a_key: bool = false,
 current_section: []u8,
 
+// This function is used to parse the value of a key in the ini file.
 fn processValue(self: *Self, expected_type: type, value_bytes: []const u8) IniParseError!expected_type {
     const type_info: builtin.Type = @typeInfo(expected_type);
     switch (type_info) {
@@ -89,18 +109,16 @@ fn nextToken(
     // assert that the key is correct
     std.debug.assert(expected_key.len > 0);
 
-    // var stream: io.FixedBufferStream([]u8) = io.fixedBufferStream(self.buffer);
-    // const writer = stream.writer();
-
     // seek to next line
     while (true) {
         self.token_pos = 0;
-        if (self.missedAKey) {
-            self.missedAKey = false;
+        if (self.missed_a_key) {
+            self.missed_a_key = false;
         } else {
             reader.streamUntilDelimiter(self.stream.writer(), '\n', self.config.max_line_size) catch |err| {
                 switch (err) {
                     error.StreamTooLong => {
+                        // The line is too long. Increase max_line_size in the config argument.
                         return IniParseError.LineTooLong;
                     },
                     error.EndOfStream => {
@@ -108,6 +126,7 @@ fn nextToken(
                         return IniParseError.UnexpectedEOF;
                     },
                     else => {
+                        // Something really unexpected happened
                         return IniParseError.InvalidFile;
                     },
                 }
@@ -147,7 +166,9 @@ fn nextToken(
             if (section_end == self.bytes_read) {
                 return IniParseError.InvalidSection;
             }
-            std.debug.assert(self.buffer[section_end] == ']');
+            if (self.buffer[section_end] != ']') {
+                return IniParseError.InvalidSection;
+            }
 
             const subbest_section_name = blk: {
                 if (last_dot) |pos| {
@@ -226,9 +247,6 @@ fn nextToken(
     return self.processValue(expected_type, value_bytes);
 }
 
-// Parse a file and return a struct
-// T: type of the struct to return
-// reader: reader to read the file. Must implement GenericReader
 fn parseWithDefaultValuesInternal(
     self: *Self,
     T: type,
@@ -239,6 +257,8 @@ fn parseWithDefaultValuesInternal(
     switch (type_info) {
         .Struct => {},
         .Optional => {
+            // if the type is optional, we need to parse the child type
+            // if the child type is not a struct, itll just return invalidtype anyw
             const result = try self.parseWithDefaultValuesInternal(type_info.Optional.child, instance, reader);
             return @as(T, result);
         },
@@ -253,6 +273,7 @@ fn parseWithDefaultValuesInternal(
         const field_type = field.type;
         const field_key = field.name;
         if (field_key.len > self.config.max_line_size) {
+            // increase max_line_size in the config argument
             return IniParseError.LineTooLong;
         }
 
@@ -304,8 +325,18 @@ fn parseWithDefaultValuesInternal(
                     if (self.config.error_on_missing_key and !(field_type_info == .Optional)) {
                         return err;
                     } else {
-                        self.missedAKey = true;
+                        self.missed_a_key = true;
                         self.token_pos = 0;
+                        if (self.has_default_values) {
+                            // set it to what's arleady set
+                            break :blk @field(instance, field_key);
+                        }
+                        if (field_type_info == .Optional) {
+                            // only if no default is set
+                            // and the field is optional, set it to null
+                            break :blk null;
+                        }
+                        // this is almost def undefined
                         break :blk @field(instance, field_key);
                     }
                 },
@@ -320,7 +351,30 @@ fn parseWithDefaultValuesInternal(
     return result;
 }
 
-// You are responsible for freeing all arrays or pointers returned by this function
+inline fn verifyFileComplete(self: *Self, reader: anytype) IniParseError!bool {
+    // run it again on an unknown key to make sure we are at the end of the file
+    _ = self.nextToken(reader, "check", u8) catch |err| {
+        switch (err) {
+            IniParseError.KeyNotFound => {
+                return IniParseError.UnexpectedData;
+            },
+            IniParseError.UnexpectedEOF => {
+                return true;
+            },
+            else => {
+                return err;
+            },
+        }
+    };
+    return IniParseError.UnexpectedData;
+}
+
+/// You are responsible for freeing all arrays or pointers returned by this function
+/// `alloc`: the allocator to use for allocating memory
+/// `T`: the type of the struct to parse
+/// `instance`: the instance of the struct to parse into
+/// `reader`: the reader to read the ini file from
+/// `config`: the configuration for the parser - see `ParserConfig`
 pub fn parseWithDefaultValues(
     alloc: mem.Allocator,
     T: type,
@@ -337,38 +391,49 @@ pub fn parseWithDefaultValues(
         .buffer = &buffer,
         .stream = stream,
         .current_section = &current_section,
+        .has_default_values = true,
     };
 
     const result = try self.parseWithDefaultValuesInternal(T, instance, reader);
 
-    _ = self.nextToken(reader, "check", u8) catch |err| {
-        switch (err) {
-            IniParseError.KeyNotFound => {
-                return IniParseError.UnexpectedData;
-            },
-            IniParseError.UnexpectedEOF => {
-                return result;
-            },
-            else => {
-                return err;
-            },
-        }
-    };
-    // reset streams and buffers
-    self.stream.reset();
-    self.token_pos = 0;
-    self.bytes_read = 0;
-    self.missedAKey = false;
-
-    return IniParseError.UnexpectedData;
+    const verify = self.verifyFileComplete(reader);
+    if (try verify) {
+        return result;
+    } else {
+        return IniParseError.UnexpectedData;
+    }
 }
 
-// You are responsible for freeing all arrays or pointers returned by this function
+/// You are responsible for freeing all arrays or pointers returned by this function
+/// `alloc`: the allocator to use for allocating memory
+/// `T`: the type of the struct to parse
+/// `reader`: the reader to read the ini file from
+/// `config`: the configuration for the parser - see `ParserConfig`
 pub fn parse(
     alloc: mem.Allocator,
     T: type,
     reader: anytype,
     config: ParserConfig,
 ) IniParseError!T {
-    return parseWithDefaultValues(alloc, T, undefined, reader, config);
+    // return parseWithDefaultValues(alloc, T, undefined, reader, config);
+    var buffer: [config.max_line_size]u8 = undefined;
+    const stream = io.fixedBufferStream(&buffer);
+    var current_section: [config.max_line_size]u8 = undefined;
+    var self = Self{
+        .alloc = alloc,
+        .config = config,
+        .buffer = &buffer,
+        .stream = stream,
+        .current_section = &current_section,
+        .has_default_values = false,
+    };
+
+    const result = try self.parseWithDefaultValuesInternal(T, undefined, reader);
+
+    const verify = self.verifyFileComplete(reader);
+    if (try verify) {
+        return result;
+    } else {
+        return IniParseError.UnexpectedData;
+    }
 }
