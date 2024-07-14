@@ -301,7 +301,7 @@ fn parseWithDefaultValuesInternal(
         const field_value = self.nextToken(reader, field_key, field_type) catch |err| blk: {
             switch (err) {
                 IniParseError.KeyNotFound => {
-                    if (self.config.error_on_missing_key) {
+                    if (self.config.error_on_missing_key and !(field_type_info == .Optional)) {
                         return err;
                     } else {
                         self.missedAKey = true;
