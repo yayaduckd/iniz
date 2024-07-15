@@ -311,7 +311,24 @@ fn parseWithDefaultValuesInternal(
                 self.current_section.len = field_key.len;
                 @memcpy(self.current_section, field_key);
                 reader.skipUntilDelimiterOrEof('\n') catch return IniParseError.InternalParseError;
-                const sub_instance = try self.parseWithDefaultValuesInternal(field_type, @field(instance, field_key), reader);
+                const sub_instance = self.parseWithDefaultValuesInternal(
+                    field_type,
+                    @field(instance, field_key),
+                    reader,
+                ) catch |err| blk: {
+                    switch (err) {
+                        IniParseError.UnexpectedEOF => {
+                            if (self.config.error_on_missing_key and !(field_type_info == .Optional)) {
+                                return err;
+                            } else {
+                                break :blk @field(instance, field_key);
+                            }
+                        },
+                        else => {
+                            return err;
+                        },
+                    }
+                };
                 @field(result, field_key) = sub_instance;
                 continue;
             },
@@ -330,7 +347,11 @@ fn parseWithDefaultValuesInternal(
                             switch (err) {
                                 IniParseError.UnexpectedEOF => {
                                     @field(result, field_key) = null;
-                                    break :blk @field(instance, field_key);
+                                    if (self.config.error_on_missing_key and !(field_type_info == .Optional)) {
+                                        return err;
+                                    } else {
+                                        break :blk @field(instance, field_key);
+                                    }
                                 },
                                 else => {
                                     return err;
