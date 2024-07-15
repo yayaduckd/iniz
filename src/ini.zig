@@ -7,45 +7,45 @@ const builtin = std.builtin;
 const testing = std.testing;
 
 pub const IniParseError = error{
-    // The type you want to parse into is not supported. It must be either a struct or an optional struct.
+    /// The type you want to parse into is not supported. It must be either a struct or an optional struct.
     InvalidType,
-    // The type of the FIELD you want to parse into is not supported.
+    /// The type of the FIELD you want to parse into is not supported.
     UnsupportedType,
-    // The line in the ini file is too long. Increase max_line_size in the config argument.
+    /// The line in the ini file is too long. Increase max_line_size in the config argument.
     LineTooLong,
-    // The section has invalid syntax or other issues.
+    /// The section has invalid syntax or other issues.
     InvalidSection,
-    // The key has invalid syntax or other issues.
+    /// The key has invalid syntax or other issues.
     InvalidKey,
-    // The value has invalid syntax, cannot be parsed into the destination type, or other issues.
+    /// The value has invalid syntax, cannot be parsed into the destination type, or other issues.
     InvalidValue,
-    // The line of the ini file has invalid syntax or other issues.
+    /// The line of the ini file has invalid syntax or other issues.
     InvalidLine,
-    // Something about the file is invalid or unexpected.
+    /// Something about the file is invalid or unexpected.
     InvalidFile,
-    // Something unexpected went wrong with a standard library function.
+    /// Something unexpected went wrong with a standard library function.
     InternalParseError,
-    // The file ended unexpectedly.
+    /// The file ended unexpectedly.
     UnexpectedEOF,
-    // The file has unexpected data somewhere.
+    /// The file has unexpected data somewhere.
     UnexpectedData,
-    // The key was not found in the file.
+    /// The key was not found in the file.
     KeyNotFound,
 };
 
 pub const ParserConfig = struct {
-    // How long a line of the ini file can be before it's considered too long
-    // and causes an error.
+    /// How long a line of the ini file can be before it's considered too long
+    /// and causes an error.
     comptime max_line_size: usize = 1024,
 
-    // If true, the parser will error if an expected key is missing from the ini file.
-    // Otherwise, it will be ignored and left undefined or as the given default value.
-    //
-    // If a struct field is optional, it will never error if the key is missing (instead
-    // it will be left as null or the default value if it's set).
-    //
-    // Be careful: setting this to false can lead to an undefined value ending up in the
-    // destination struct.
+    /// If true, the parser will error if an expected key is missing from the ini file.
+    /// Otherwise, it will be ignored and left undefined or as the given default value.
+    ///
+    /// If a struct field is optional, it will never error if the key is missing (instead
+    /// it will be left as null or the default value if it's set).
+    ///
+    /// Be careful: setting this to false can lead to an undefined value ending up in the
+    /// destination struct.
     error_on_missing_key: bool = true,
 };
 
@@ -73,9 +73,24 @@ fn processValue(self: *Self, expected_type: type, value_bytes: []const u8) IniPa
                 return IniParseError.InvalidValue;
             };
         },
+        .Float => {
+            return std.fmt.parseFloat(expected_type, value_bytes) catch {
+                return IniParseError.InvalidValue;
+            };
+        },
+        .Bool => {
+            if (mem.eql(u8, value_bytes, "true")) {
+                return true;
+            } else if (mem.eql(u8, value_bytes, "false")) {
+                return false;
+            } else {
+                return IniParseError.InvalidValue;
+            }
+        },
         .Pointer => {
             switch (type_info.Pointer.size) {
                 .Slice => {
+                    // Remember to free this
                     return self.alloc.dupe(type_info.Pointer.child, value_bytes) catch {
                         return IniParseError.InternalParseError;
                     };
@@ -89,7 +104,7 @@ fn processValue(self: *Self, expected_type: type, value_bytes: []const u8) IniPa
             return try self.processValue(type_info.Optional.child, value_bytes);
         },
         .Enum => {
-            return std.meta.stringToEnum(expected_type, value_bytes) orelse {
+            return meta.stringToEnum(expected_type, value_bytes) orelse {
                 return IniParseError.InvalidValue;
             };
         },
@@ -97,6 +112,51 @@ fn processValue(self: *Self, expected_type: type, value_bytes: []const u8) IniPa
             return IniParseError.UnsupportedType;
         },
     }
+}
+
+fn findNextTokenPos(self: *Self, reader: anytype) IniParseError!bool {
+    self.token_pos = 0;
+    if (self.missed_a_key) {
+        self.missed_a_key = false;
+    } else {
+        reader.streamUntilDelimiter(self.stream.writer(), '\n', self.config.max_line_size) catch |err| {
+            switch (err) {
+                error.StreamTooLong => {
+                    // The line is too long. Increase max_line_size in the config argument.
+                    return IniParseError.LineTooLong;
+                },
+                error.EndOfStream => {
+                    // we reached the end of the file
+                    return IniParseError.UnexpectedEOF;
+                },
+                else => {
+                    // Something really unexpected happened
+                    return IniParseError.InvalidFile;
+                },
+            }
+        };
+        self.bytes_read = self.stream.getPos() catch return IniParseError.InternalParseError;
+        self.stream.reset();
+    }
+
+    if (self.bytes_read == 0) {
+        return false;
+    }
+
+    // seek to next token
+    while (self.token_pos < self.bytes_read and self.buffer[self.token_pos] == ' ') {
+        self.token_pos += 1;
+    }
+
+    if (self.token_pos == self.bytes_read) {
+        return false; // empty line
+    }
+
+    // check if it's a comment
+    if (self.buffer[self.token_pos] == ';' or self.buffer[self.token_pos] == '#') {
+        return false;
+    }
+    return true;
 }
 
 fn nextToken(
@@ -111,44 +171,15 @@ fn nextToken(
 
     // seek to next line
     while (true) {
-        self.token_pos = 0;
-        if (self.missed_a_key) {
-            self.missed_a_key = false;
-        } else {
-            reader.streamUntilDelimiter(self.stream.writer(), '\n', self.config.max_line_size) catch |err| {
-                switch (err) {
-                    error.StreamTooLong => {
-                        // The line is too long. Increase max_line_size in the config argument.
-                        return IniParseError.LineTooLong;
-                    },
-                    error.EndOfStream => {
-                        // we reached the end of the file
-                        return IniParseError.UnexpectedEOF;
-                    },
-                    else => {
-                        // Something really unexpected happened
-                        return IniParseError.InvalidFile;
-                    },
-                }
-            };
-            self.bytes_read = self.stream.getPos() catch return IniParseError.InternalParseError;
-            self.stream.reset();
-        }
-
-        if (self.bytes_read == 0) {
+        // if (self.missed_a_key) {
+        //     self.missed_a_key = false;
+        // } else {
+        const found = try self.findNextTokenPos(reader);
+        if (!found) {
             continue;
         }
 
-        // seek to next token
-        while (self.token_pos < self.bytes_read and self.buffer[self.token_pos] == ' ') {
-            self.token_pos += 1;
-        }
-
-        if (self.token_pos == self.bytes_read) {
-            continue; // empty line
-        }
         // check if it's a header
-
         // section format: [TopLevel.section.subsection]
         if (self.buffer[self.token_pos] == '[') {
             if (self.current_section.len == 0) {
@@ -192,11 +223,7 @@ fn nextToken(
             }
 
             continue;
-        }
-
-        // check if it's a comment
-        if (self.buffer[self.token_pos] == ';' or self.buffer[self.token_pos] == '#') {
-            continue;
+            // }
         }
 
         break;
@@ -351,22 +378,44 @@ fn parseWithDefaultValuesInternal(
     return result;
 }
 
-inline fn verifyFileComplete(self: *Self, reader: anytype) IniParseError!bool {
-    // run it again on an unknown key to make sure we are at the end of the file
-    _ = self.nextToken(reader, "check", u8) catch |err| {
+fn runParser(
+    alloc: mem.Allocator,
+    T: type,
+    instance: T,
+    reader: anytype,
+    config: ParserConfig,
+    has_default_values: bool,
+) IniParseError!T {
+    var buffer: [config.max_line_size]u8 = undefined;
+    const stream = io.fixedBufferStream(&buffer);
+    var current_section: [config.max_line_size]u8 = undefined;
+    var self = Self{
+        .alloc = alloc,
+        .config = config,
+        .buffer = &buffer,
+        .stream = stream,
+        .current_section = &current_section,
+        .has_default_values = has_default_values,
+    };
+
+    const result = try self.parseWithDefaultValuesInternal(T, instance, reader);
+
+    const otherKeyFound = self.findNextTokenPos(reader) catch |err| blk: {
         switch (err) {
-            IniParseError.KeyNotFound => {
-                return IniParseError.UnexpectedData;
-            },
             IniParseError.UnexpectedEOF => {
-                return true;
+                break :blk false;
             },
             else => {
-                return err;
+                return IniParseError.UnexpectedData;
             },
         }
     };
-    return IniParseError.UnexpectedData;
+
+    if (!otherKeyFound) {
+        return result;
+    } else {
+        return IniParseError.UnexpectedData;
+    }
 }
 
 /// You are responsible for freeing all arrays or pointers returned by this function
@@ -382,26 +431,7 @@ pub fn parseWithDefaultValues(
     reader: anytype,
     config: ParserConfig,
 ) IniParseError!T {
-    var buffer: [config.max_line_size]u8 = undefined;
-    const stream = io.fixedBufferStream(&buffer);
-    var current_section: [config.max_line_size]u8 = undefined;
-    var self = Self{
-        .alloc = alloc,
-        .config = config,
-        .buffer = &buffer,
-        .stream = stream,
-        .current_section = &current_section,
-        .has_default_values = true,
-    };
-
-    const result = try self.parseWithDefaultValuesInternal(T, instance, reader);
-
-    const verify = self.verifyFileComplete(reader);
-    if (try verify) {
-        return result;
-    } else {
-        return IniParseError.UnexpectedData;
-    }
+    return runParser(alloc, T, instance, reader, config, true);
 }
 
 /// You are responsible for freeing all arrays or pointers returned by this function
@@ -415,25 +445,5 @@ pub fn parse(
     reader: anytype,
     config: ParserConfig,
 ) IniParseError!T {
-    // return parseWithDefaultValues(alloc, T, undefined, reader, config);
-    var buffer: [config.max_line_size]u8 = undefined;
-    const stream = io.fixedBufferStream(&buffer);
-    var current_section: [config.max_line_size]u8 = undefined;
-    var self = Self{
-        .alloc = alloc,
-        .config = config,
-        .buffer = &buffer,
-        .stream = stream,
-        .current_section = &current_section,
-        .has_default_values = false,
-    };
-
-    const result = try self.parseWithDefaultValuesInternal(T, undefined, reader);
-
-    const verify = self.verifyFileComplete(reader);
-    if (try verify) {
-        return result;
-    } else {
-        return IniParseError.UnexpectedData;
-    }
+    return runParser(alloc, T, undefined, reader, config, false);
 }
